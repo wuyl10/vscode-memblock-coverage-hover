@@ -1,0 +1,186 @@
+{
+  "name": "memblock-coverage-hover",
+  "displayName": "MemBlock Coverage Hover",
+  "description": "Hover, search, and glossary support for MemBlock functional coverage testpoints, signals, covergroups, coverpoints, bins, and crosses.",
+  "version": "0.1.0",
+  "publisher": "wuyuanlong-local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:systemverilog",
+    "onLanguage:verilog",
+    "onCommand:memblockCoverageHover.rescan",
+    "onCommand:memblockCoverageHover.searchSymbol",
+    "onCommand:memblockCoverageHover.openGlossary",
+    "onCommand:memblockCoverageHover.toggleEnable",
+    "onCommand:memblockCoverageHover.openLocation",
+    "onView:memblockCoverageHover.symbols"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "memblockCoverageHover.rescan",
+        "title": "MemBlock Coverage Hover: Rescan Symbols",
+        "shortTitle": "Rescan Symbols",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "memblockCoverageHover.searchSymbol",
+        "title": "MemBlock Coverage Hover: Search Symbol",
+        "shortTitle": "Search Symbol",
+        "icon": "$(search)"
+      },
+      {
+        "command": "memblockCoverageHover.openGlossary",
+        "title": "MemBlock Coverage Hover: Open Glossary",
+        "shortTitle": "Open Glossary",
+        "icon": "$(book)"
+      },
+      {
+        "command": "memblockCoverageHover.toggleEnable",
+        "title": "MemBlock Coverage Hover: Toggle Enable",
+        "shortTitle": "Toggle Enable",
+        "icon": "$(circle-slash)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "memblockCoverageHover.rescan",
+        "key": "ctrl+alt+m r",
+        "when": "memblockCoverageHover.enabled"
+      },
+      {
+        "command": "memblockCoverageHover.searchSymbol",
+        "key": "ctrl+alt+m s",
+        "when": "memblockCoverageHover.enabled"
+      },
+      {
+        "command": "memblockCoverageHover.openGlossary",
+        "key": "ctrl+alt+m g",
+        "when": "memblockCoverageHover.enabled"
+      },
+      {
+        "command": "memblockCoverageHover.toggleEnable",
+        "key": "ctrl+alt+m t"
+      }
+    ],
+    "configuration": {
+      "title": "MemBlock Coverage Hover",
+      "properties": {
+        "memblockCoverageHover.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable hover help for MemBlock functional coverage symbols."
+        },
+        "memblockCoverageHover.includeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/coverage/memblock/**/*.sv"
+          ],
+          "description": "SV files scanned for MemBlock coverage hover annotations and fallback symbols."
+        },
+        "memblockCoverageHover.excludeGlob": {
+          "type": "string",
+          "default": "**/{.git,node_modules,tools/vscode-memblock-coverage-hover}/**",
+          "description": "Glob excluded from MemBlock coverage hover scans."
+        },
+        "memblockCoverageHover.showAutoFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show automatically inferred hover entries for unannotated testpoints, covergroups, coverpoints, bins, crosses, wires, regs, and RTL aliases."
+        },
+        "memblockCoverageHover.showSourceLocation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show source file and line in hover details."
+        },
+        "memblockCoverageHover.hoverDetailLevel": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "default": "compact",
+          "description": "Compact shows only beginner-friendly hover fields. Full shows all annotated and inferred fields."
+        },
+        "memblockCoverageHover.maxHoverFields": {
+          "type": "number",
+          "default": 18,
+          "minimum": 4,
+          "maximum": 80,
+          "description": "Maximum number of fields displayed in one hover popup."
+        },
+        "memblockCoverageHover.showRelatedSignals": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show related signals in hover popups."
+        },
+        "memblockCoverageHover.relatedSignalsClickable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render related signals as clickable file links. VSCode may still show a file path tooltip, but it will not show command URI text."
+        },
+        "memblockCoverageHover.maxRelatedSignals": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "maximum": 32,
+          "description": "Maximum number of related signal links displayed in one hover popup."
+        },
+        "memblockCoverageHover.scanOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Scan all configured coverage symbols when the extension starts. Disabled by default; hover lazily indexes the current file."
+        },
+        "memblockCoverageHover.showStatusBar": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show a MemBlock Coverage Hover status bar item. Disabled by default to keep normal editing visuals unchanged."
+        },
+        "memblockCoverageHover.showSymbolsView": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the MemBlock Coverage Symbols view in Explorer. Disabled by default to keep the side bar uncluttered."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "memblockCoverageHover.rescan",
+          "when": "view == memblockCoverageHover.symbols",
+          "group": "navigation@1"
+        },
+        {
+          "command": "memblockCoverageHover.searchSymbol",
+          "when": "view == memblockCoverageHover.symbols",
+          "group": "navigation@2"
+        },
+        {
+          "command": "memblockCoverageHover.openGlossary",
+          "when": "view == memblockCoverageHover.symbols",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "memblockCoverageHover.symbols",
+          "name": "MemBlock Coverage Symbols",
+          "when": "memblockCoverageHover.enabled && config.memblockCoverageHover.showSymbolsView"
+        }
+      ]
+    }
+  }
+}
