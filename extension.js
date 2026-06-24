@@ -33,6 +33,10 @@ const FIELD_LABELS = {
   module: "所属模块",
   "not-proof": "注意",
   plain: "白话",
+  role: "角色",
+  "role-detail": "角色说明",
+  "role-map-line": "角色映射行",
+  "role-map-warning": "角色映射警告",
   "related-signals": "相关信号",
   rtl: "RTL 信号",
   sample: "采样",
@@ -107,10 +111,59 @@ const ANNO_KIND_MAP = {
   "cov-meta": "meta"
 };
 
+const SYMBOLS_VIEW_FILTER_OPTIONS = [
+  {
+    value: "all",
+    label: "All Symbols",
+    detail: "Show testpoints, signals, covergroups, loose symbols, and meta."
+  },
+  {
+    value: "primary",
+    label: "Primary Closure",
+    detail: "Show testpoints and covergroups listed as primary in the Covergroup role map."
+  },
+  {
+    value: "secondary",
+    label: "Secondary Context",
+    detail: "Show testpoints and covergroups listed as secondary in the Covergroup role map."
+  },
+  {
+    value: "unclassified",
+    label: "Unclassified Covergroups",
+    detail: "Show covergroups not listed in the Covergroup role map."
+  },
+  {
+    value: "testpoints",
+    label: "Testpoints Only",
+    detail: "Show only the Section 0 testpoint directory."
+  },
+  {
+    value: "covergroups",
+    label: "Covergroups Only",
+    detail: "Show only covergroups and their coverpoints/bins/crosses."
+  },
+  {
+    value: "signals",
+    label: "Signals Only",
+    detail: "Show only RTL aliases, sampled signals, windows, and helpers."
+  }
+];
+const SYMBOLS_VIEW_FILTER_VALUES = new Set(SYMBOLS_VIEW_FILTER_OPTIONS.map((item) => item.value));
+const SYMBOLS_VIEW_FILTER_SECTIONS = {
+  all: new Set(["testpoints", "signals", "covergroups", "looseCoverpoints", "looseBins", "looseCrosses", "meta", "unknown"]),
+  primary: new Set(["testpoints", "covergroups"]),
+  secondary: new Set(["testpoints", "covergroups"]),
+  unclassified: new Set(["covergroups"]),
+  testpoints: new Set(["testpoints"]),
+  covergroups: new Set(["covergroups"]),
+  signals: new Set(["signals"])
+};
+
 let output;
 let statusBar;
 let treeProvider;
 let glossaryProvider;
+let roleDiagnosticCollection;
 let scanTimer;
 let lineHighlightDecoration;
 let lineHighlightTimer;
@@ -138,7 +191,8 @@ function activate(context) {
     overviewRulerColor: new vscode.ThemeColor("editor.findMatchHighlightBackground"),
     overviewRulerLane: vscode.OverviewRulerLane.Center
   });
-  context.subscriptions.push(output, statusBar, lineHighlightDecoration);
+  roleDiagnosticCollection = vscode.languages.createDiagnosticCollection("memblock-coverage-role-map");
+  context.subscriptions.push(output, statusBar, lineHighlightDecoration, roleDiagnosticCollection);
 
   treeProvider = new SymbolTreeProvider();
   glossaryProvider = new GlossaryProvider();
@@ -171,6 +225,15 @@ function activate(context) {
     vscode.commands.registerCommand("memblockCoverageHover.toggleEnable", async () => {
       await toggleEnable();
     }),
+    vscode.commands.registerCommand("memblockCoverageHover.filterSymbolsView", async () => {
+      await filterSymbolsView();
+    }),
+    vscode.commands.registerCommand("memblockCoverageHover.validateRoleMap", async () => {
+      await validateRoleMap();
+    }),
+    vscode.commands.registerCommand("memblockCoverageHover.resetSymbolsViewFilter", async () => {
+      await resetSymbolsViewFilter();
+    }),
     vscode.commands.registerCommand("memblockCoverageHover.openLocation", async (filePath, oneBasedLine) => {
       await openPathLocation(filePath, oneBasedLine);
     })
@@ -193,6 +256,14 @@ function activate(context) {
   context.subscriptions.push(legacyDocWatcher);
 
   vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("memblockCoverageHover.symbolsViewFilter")) {
+      refreshFilterContext();
+      updateStatusBar();
+      if (treeProvider) {
+        treeProvider.refresh();
+      }
+      return;
+    }
     if (event.affectsConfiguration("memblockCoverageHover")) {
       refreshEnabledContext();
       scheduleRescan();
@@ -211,6 +282,7 @@ function activate(context) {
   }, null, context.subscriptions);
 
   refreshEnabledContext();
+  refreshFilterContext();
   updateStatusBar();
 
   if (getConfig().get("scanOnStartup", false)) {
@@ -235,9 +307,28 @@ function isEnabled() {
   return getConfig().get("enable", true);
 }
 
+function symbolsViewFilter() {
+  const value = getConfig().get("symbolsViewFilter", "all");
+  return SYMBOLS_VIEW_FILTER_VALUES.has(value) ? value : "all";
+}
+
+function symbolsViewFilterOption(value = symbolsViewFilter()) {
+  return SYMBOLS_VIEW_FILTER_OPTIONS.find((item) => item.value === value) || SYMBOLS_VIEW_FILTER_OPTIONS[0];
+}
+
+function symbolsViewFilterLabel(value = symbolsViewFilter()) {
+  return symbolsViewFilterOption(value).label;
+}
+
 function refreshEnabledContext() {
   vscode.commands.executeCommand("setContext", "memblockCoverageHover.enabled", isEnabled());
 }
+
+function refreshFilterContext() {
+  const active = symbolsViewFilter() !== "all";
+  vscode.commands.executeCommand("setContext", "memblockCoverageHover.symbolsViewFiltered", active);
+}
+
 
 function updateStatusBar() {
   if (!statusBar) {
@@ -253,6 +344,7 @@ function updateStatusBar() {
     `Files: ${lastScanSummary.files}`,
     `Symbols: ${lastScanSummary.symbols}`,
     `Aliases: ${lastScanSummary.aliases}`,
+    `Filter: ${symbolsViewFilterLabel()}`,
     `Updated: ${lastScanSummary.updatedAt}`,
     "Click to search symbols."
   ].join("\n");
@@ -304,6 +396,7 @@ function replaceDocsForFile(filePath, docs, version) {
   }
   rebuildSymbolIndex();
   refreshScanSummary();
+  refreshRoleMapDiagnosticsForFile(filePath, fileDocs);
   treeProvider.refresh();
   if (glossaryProvider) {
     glossaryProvider.refresh();
@@ -315,6 +408,7 @@ function invalidateFile(filePath) {
   documentVersions.delete(filePath);
   pendingDocumentIndexes.delete(filePath);
   canonicalDocs = canonicalDocs.filter((doc) => doc.filePath !== filePath);
+  clearRoleMapDiagnosticsForFile(filePath);
   rebuildSymbolIndex();
   refreshScanSummary();
   treeProvider.refresh();
@@ -334,10 +428,11 @@ function invalidateSidecar(sidecarPath) {
 }
 
 function refreshScanSummary() {
-  const fileSet = new Set(canonicalDocs.map((doc) => doc.filePath));
+  const visibleDocs = publicDocs(canonicalDocs);
+  const fileSet = new Set(visibleDocs.map((doc) => doc.filePath));
   lastScanSummary = {
     files: fileSet.size,
-    symbols: canonicalDocs.length,
+    symbols: visibleDocs.length,
     aliases: countAliases(),
     updatedAt: new Date().toLocaleString()
   };
@@ -348,6 +443,7 @@ async function rescanWorkspace(silent) {
     canonicalDocs = [];
     symbolIndex = new Map();
     documentVersions = new Map();
+    clearRoleMapDiagnostics();
     lastScanSummary = { files: 0, symbols: 0, aliases: 0, updatedAt: "disabled" };
     treeProvider.refresh();
     updateStatusBar();
@@ -385,6 +481,7 @@ async function rescanWorkspace(silent) {
   canonicalDocs = mergeDuplicateDocs(docs);
   rebuildSymbolIndex();
   refreshScanSummary();
+  refreshAllRoleMapDiagnostics();
 
   treeProvider.refresh();
   if (glossaryProvider) {
@@ -401,8 +498,10 @@ async function rescanWorkspace(silent) {
 
 function parseCoverageFile(text, filePath) {
   const lines = text.split(/\r?\n/);
+  const roleMap = parseCovergroupRoleMap(lines);
   const manualDocs = parseAnnotationDocs(lines, filePath);
   manualDocs.push(...parseTestpointDocs(lines, filePath));
+  manualDocs.push(...roleMapEntryDocs(roleMap, filePath));
   const autoDocs = [];
   if (getConfig().get("showAutoFallback", true)) {
     autoDocs.push(...parseAutoDocs(lines, filePath));
@@ -410,12 +509,126 @@ function parseCoverageFile(text, filePath) {
   manualDocs.push(...parseSidecarDocsForFile(filePath));
   backfillOwnershipFromAuto(manualDocs, autoDocs);
   const docs = manualDocs.concat(autoDocs);
+  applyCovergroupRoleMap(docs, roleMap);
   augmentDocsWithRelations(docs, lines);
   augmentDocsWithTestpointBackrefs(docs);
   augmentDocsWithDelayChains(docs);
   augmentDocsWithModules(docs);
   augmentDocsWithAutoMeanings(docs);
   return docs;
+}
+
+function parseCovergroupRoleMap(lines) {
+  const roles = new Map();
+  const entries = [];
+  const duplicates = [];
+  let inMap = false;
+  let currentRole = "";
+  let startLine = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const comment = rawLine.match(/^\s*\/\/\s*(.*?)\s*$/);
+    if (!inMap) {
+      if (comment && /^Covergroup\s+role\s+map\b/i.test(comment[1])) {
+        inMap = true;
+        startLine = i + 1;
+      }
+      continue;
+    }
+
+    if (!comment) {
+      break;
+    }
+
+    const text = comment[1].trim();
+    if (!text || /^[-]+$/.test(text)) {
+      continue;
+    }
+    if (/^=+$/.test(text)) {
+      break;
+    }
+
+    const role = text.match(/^(primary|secondary)\s*:\s*$/i);
+    if (role) {
+      currentRole = role[1].toLowerCase();
+      continue;
+    }
+
+    const entry = text.match(/^(cg_[A-Za-z_][A-Za-z0-9_$]*)\s*(?:[-:]\s*(.+?))?\s*$/);
+    if (entry && currentRole) {
+      const name = entry[1];
+      const mapped = {
+        role: currentRole,
+        detail: entry[2] ? entry[2].trim() : "",
+        line: i + 1
+      };
+      entries.push({ name, ...mapped });
+      if (roles.has(name)) {
+        duplicates.push({ name, first: roles.get(name), duplicate: mapped });
+      }
+      roles.set(name, mapped);
+    }
+  }
+
+  return { roles, entries, duplicates, startLine };
+}
+
+function applyCovergroupRoleMap(docs, roleMap) {
+  const roles = roleMap.roles || new Map();
+  if (roles.size === 0) {
+    return;
+  }
+  for (const doc of docs) {
+    if (doc.kind !== "covergroup") {
+      continue;
+    }
+    const mapped = roles.get(doc.name);
+    if (!mapped) {
+      continue;
+    }
+    setField(doc, "role", mapped.role);
+    if (mapped.detail) {
+      setField(doc, "role-detail", mapped.detail);
+    }
+    setField(doc, "role-map-line", String(mapped.line));
+  }
+}
+
+
+function roleMapEntryDocs(roleMap, filePath) {
+  const docs = [];
+  const entries = roleMap.entries || [];
+  for (const mapped of entries) {
+    const safeName = mapped.name.replace(/[^A-Za-z0-9_$]/g, "_");
+    const doc = makeDoc(`covergroup_role_map_entry_${mapped.line}_${safeName}`, "meta", filePath, mapped.line, true);
+    doc.sourceLine = mapped.name;
+    addField(doc, "internal", "covergroup-role-map");
+    addField(doc, "covergroup", mapped.name);
+    addField(doc, "role", mapped.role);
+    addField(doc, "role-map-line", String(mapped.line));
+    if (mapped.detail) {
+      addField(doc, "role-detail", mapped.detail);
+    }
+    docs.push(doc);
+  }
+  return docs;
+}
+
+function isInternalDoc(doc) {
+  return firstField(doc, "internal") === "covergroup-role-map";
+}
+
+function publicDocs(docs) {
+  return docs.filter((doc) => !isInternalDoc(doc));
+}
+
+function isRoleMapEntryDoc(doc) {
+  return doc.kind === "meta" && firstField(doc, "internal") === "covergroup-role-map";
+}
+
+function roleMapEntryDocsFromDocs(docs) {
+  return sortDocs(docs.filter(isRoleMapEntryDoc));
 }
 
 const TESTPOINT_CG_RELATION_RE = String.raw`direct(?:\s*(?:\/|\+)\s*proxy)?|proxy(?:\s*(?:\/|\+)\s*direct)?`;
@@ -1265,7 +1478,7 @@ function singleBinaryLiteralBits(expr) {
 
 function rebuildSymbolIndex() {
   symbolIndex = new Map();
-  for (const doc of canonicalDocs) {
+  for (const doc of publicDocs(canonicalDocs)) {
     addIndexEntry(doc.name, doc);
     for (const alias of doc.aliases) {
       addIndexEntry(alias, doc);
@@ -2130,7 +2343,7 @@ async function searchSymbol() {
     await rescanWorkspace(true);
   }
 
-  const items = canonicalDocs.map((doc) => {
+  const items = publicDocs(canonicalDocs).map((doc) => {
     const meaning = firstField(doc, "meaning") || firstField(doc, "expr") || firstField(doc, "decl") || "";
     return {
       label: doc.name,
@@ -2176,11 +2389,76 @@ async function toggleEnable() {
   const next = !cfg.get("enable", true);
   await cfg.update("enable", next, vscode.ConfigurationTarget.Workspace);
   refreshEnabledContext();
+  refreshFilterContext();
   updateStatusBar();
   if (next) {
     await rescanWorkspace(false);
   } else {
     vscode.window.showInformationMessage("MemBlock Coverage Hover disabled for this workspace.");
+  }
+}
+
+async function filterSymbolsView() {
+  const current = symbolsViewFilter();
+  const items = SYMBOLS_VIEW_FILTER_OPTIONS.map((option) => ({
+    label: option.label,
+    description: option.value === current ? "current" : option.value,
+    detail: option.detail,
+    picked: option.value === current,
+    value: option.value
+  }));
+  const picked = await vscode.window.showQuickPick(items, {
+    title: "MemBlock Coverage Symbols Filter",
+    placeHolder: "Choose what the Symbols tree should show",
+    matchOnDescription: true,
+    matchOnDetail: true
+  });
+  if (!picked) {
+    return;
+  }
+  await getConfig().update("symbolsViewFilter", picked.value, vscode.ConfigurationTarget.Workspace);
+  refreshFilterContext();
+  updateStatusBar();
+  if (treeProvider) {
+    treeProvider.refresh();
+  }
+}
+
+async function resetSymbolsViewFilter() {
+  await getConfig().update("symbolsViewFilter", "all", vscode.ConfigurationTarget.Workspace);
+  refreshFilterContext();
+  updateStatusBar();
+  if (treeProvider) {
+    treeProvider.refresh();
+  }
+}
+
+async function validateRoleMap() {
+  const filePath = activeCoverageFilePath();
+  if (!filePath) {
+    vscode.window.showInformationMessage("Open a MemBlock coverage .sv file before validating its role map.");
+    return;
+  }
+  let docs = docsForFile(filePath);
+  if (docs.length === 0) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && editor.document.uri.fsPath === filePath) {
+      await ensureDocumentIndexed(editor.document);
+      docs = docsForFile(filePath);
+    }
+  }
+  const diagnostics = roleMapDiagnostics(filePath, docs);
+  refreshRoleMapDiagnosticsForFile(filePath, docs);
+  const lines = roleMapDiagnosticLines(filePath, diagnostics);
+  output.show(true);
+  output.appendLine(lines.join("\n"));
+  const summary = roleMapSummaryText(diagnostics);
+  const severity = diagnostics.missingTargets.length || diagnostics.duplicates.length ? "Warning" : "Information";
+  const action = await vscode.window[`show${severity}Message`](summary, "Show Details", "Open Role Map");
+  if (action === "Show Details") {
+    output.show(true);
+  } else if (action === "Open Role Map" && diagnostics.startLine) {
+    await openPathLocation(filePath, diagnostics.startLine);
   }
 }
 
@@ -2203,6 +2481,28 @@ class SymbolTreeProvider {
       return item;
     }
 
+    if (element.type === "roleWarning") {
+      const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+      item.description = element.description || "";
+      item.tooltip = element.tooltip || element.label;
+      item.iconPath = new vscode.ThemeIcon("warning");
+      item.contextValue = "memblockCoverageRoleWarning";
+      if (element.filePath && element.line) {
+        item.command = openLocationCommand(element.filePath, element.line);
+      }
+      return item;
+    }
+
+    if (element.type === "filterState") {
+      const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+      item.description = element.description || "";
+      item.tooltip = element.tooltip || element.label;
+      item.iconPath = new vscode.ThemeIcon("filter");
+      item.contextValue = "memblockCoverageFilterState";
+      item.command = { command: "memblockCoverageHover.filterSymbolsView", title: "Change Symbols Filter" };
+      return item;
+    }
+
     if (element.type === "workspace") {
       const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.Collapsed);
       item.description = `${element.files.length} files`;
@@ -2217,8 +2517,12 @@ class SymbolTreeProvider {
         element.label,
         element.current ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed
       );
-      item.description = `${element.docs.length} symbols`;
-      item.tooltip = `${relativePath(element.filePath)}\n${fileCountSummary(element.docs)}`;
+      const filter = symbolsViewFilter();
+      const diagnostics = roleMapDiagnostics(element.filePath, element.docs);
+      const publicCount = publicDocs(element.docs).length;
+      const roleSummary = roleMapSummaryText(diagnostics);
+      item.description = filter === "all" ? `${publicCount} symbols` : `${symbolsViewFilterLabel(filter)} · ${roleSummary}`;
+      item.tooltip = `${relativePath(element.filePath)}\n${fileCountSummary(element.docs)}\nRole map: ${roleSummary}\nFilter: ${symbolsViewFilterLabel(filter)}`;
       item.iconPath = new vscode.ThemeIcon(element.current ? "file-code" : "file");
       item.contextValue = "memblockCoverageFile";
       item.command = openLocationCommand(element.filePath, 1);
@@ -2235,7 +2539,7 @@ class SymbolTreeProvider {
     }
 
     if (element.type === "testpoint") {
-      const refs = testpointCgRefs(element.doc);
+      const refs = filteredTestpointRefs(element.doc, element.fileDocs);
       const item = new vscode.TreeItem(element.doc.name, refs.length > 0 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
       item.description = refs.length > 0 ? `${refs.length} cg` : shortDescription(element.doc);
       item.tooltip = treeTooltipForDoc(element.doc);
@@ -2247,7 +2551,9 @@ class SymbolTreeProvider {
 
     if (element.type === "covergroupRef") {
       const item = new vscode.TreeItem(element.ref.name, vscode.TreeItemCollapsibleState.None);
-      item.description = `${element.ref.relation}: ${truncateText(element.ref.meaning, 44)}`;
+      const role = covergroupRole(element.target);
+      const prefix = role ? `${role} · ` : "";
+      item.description = `${prefix}${element.ref.relation}: ${truncateText(element.ref.meaning, 44)}`;
       item.tooltip = treeTooltipForCovergroupRef(element.ref, element.doc, element.target);
       item.iconPath = new vscode.ThemeIcon(element.target ? "symbol-namespace" : "warning");
       item.contextValue = "memblockCoverageCovergroupRef";
@@ -2267,7 +2573,9 @@ class SymbolTreeProvider {
     if (element.type === "covergroup") {
       const counts = covergroupCounts(element.fileDocs, element.doc);
       const item = new vscode.TreeItem(element.doc.name, vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = `${counts.coverpoints} cp · ${counts.bins} bins · ${counts.crosses} cross`;
+      const role = covergroupRole(element.doc);
+      const prefix = role ? `${role} · ` : "unclassified · ";
+      item.description = `${prefix}${counts.coverpoints} cp · ${counts.bins} bins · ${counts.crosses} cross`;
       item.tooltip = treeTooltipForDoc(element.doc);
       item.iconPath = new vscode.ThemeIcon("symbol-namespace");
       item.contextValue = "memblockCoverageCovergroup";
@@ -2387,6 +2695,16 @@ function rootTreeNodes() {
   const activeFilePath = activeCoverageFilePath();
   const files = sortedIndexedFiles();
   const nodes = [];
+  const filter = symbolsViewFilter();
+
+  if (filter !== "all") {
+    nodes.push({
+      type: "filterState",
+      label: `Filter: ${symbolsViewFilterLabel(filter)}`,
+      description: "click to change",
+      tooltip: "Symbols view is filtered. Use the filter button or Reset Filter to show all symbols."
+    });
+  }
 
   if (activeFilePath) {
     const activeDocs = docsForFile(activeFilePath);
@@ -2403,7 +2721,7 @@ function rootTreeNodes() {
   }
 
   const otherFiles = files.filter((filePath) => filePath !== activeFilePath);
-  if (otherFiles.length > 0) {
+  if (otherFiles.length > 0 && filter === "all") {
     nodes.push({ type: "workspace", label: "Other Scanned Files", files: otherFiles });
   }
 
@@ -2430,17 +2748,27 @@ function fileNode(filePath, docs, current) {
 }
 
 function fileSectionNodes(filePath, docs) {
-  const testpoints = docs.filter((doc) => doc.kind === "testpoint");
+  const filter = symbolsViewFilter();
+  const show = (section) => symbolsViewShowsSection(filter, section);
+  const testpointsAll = docs.filter((doc) => doc.kind === "testpoint");
   const signals = docs.filter((doc) => doc.kind === "signal");
-  const covergroups = docs.filter((doc) => doc.kind === "covergroup");
+  const covergroupsAll = docs.filter((doc) => doc.kind === "covergroup");
+  const testpoints = filterTestpointDocs(testpointsAll, filePath, docs, filter);
+  const covergroups = filterCovergroupDocs(covergroupsAll, filter);
+  const diagnostics = roleMapDiagnostics(filePath, docs);
   const orphanCoverpoints = docs.filter((doc) => doc.kind === "coverpoint" && !firstField(doc, "covergroup"));
   const orphanBins = docs.filter((doc) => doc.kind === "bin" && !firstField(doc, "coverpoint"));
   const orphanCrosses = docs.filter((doc) => doc.kind === "cross" && !firstField(doc, "covergroup"));
-  const meta = docs.filter((doc) => doc.kind === "meta");
+  const meta = docs.filter((doc) => doc.kind === "meta" && !isInternalDoc(doc));
   const unknown = docs.filter((doc) => !["testpoint", "signal", "covergroup", "coverpoint", "bin", "cross", "meta"].includes(doc.kind));
 
   const sections = [];
-  if (testpoints.length > 0) {
+  if (shouldShowRoleWarnings(filter)) {
+    for (const warning of roleWarningNodes(filePath, diagnostics)) {
+      sections.push(warning);
+    }
+  }
+  if (show("testpoints") && testpoints.length > 0) {
     sections.push({
       type: "section",
       section: "testpoints",
@@ -2451,7 +2779,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "Section 0 反标目录里的测试点大类；展开后查看它指向的 direct/proxy covergroup。"
     });
   }
-  if (signals.length > 0) {
+  if (show("signals") && signals.length > 0) {
     sections.push({
       type: "section",
       section: "signals",
@@ -2462,7 +2790,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "本文件里用于采样、组合窗口、打一拍窗口、RTL alias 的信号列表。"
     });
   }
-  if (covergroups.length > 0) {
+  if (show("covergroups") && covergroups.length > 0) {
     sections.push({
       type: "section",
       section: "covergroups",
@@ -2473,7 +2801,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "按 covergroup 展开，再看其中的 coverpoint、bin 和 cross。"
     });
   }
-  if (orphanCoverpoints.length > 0) {
+  if (show("looseCoverpoints") && orphanCoverpoints.length > 0) {
     sections.push({
       type: "section",
       section: "looseCoverpoints",
@@ -2484,7 +2812,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "没有解析到所属 covergroup 的 coverpoint。"
     });
   }
-  if (orphanBins.length > 0) {
+  if (show("looseBins") && orphanBins.length > 0) {
     sections.push({
       type: "section",
       section: "looseBins",
@@ -2495,7 +2823,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "没有解析到所属 coverpoint 的 bin。"
     });
   }
-  if (orphanCrosses.length > 0) {
+  if (show("looseCrosses") && orphanCrosses.length > 0) {
     sections.push({
       type: "section",
       section: "looseCrosses",
@@ -2506,7 +2834,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "没有解析到所属 covergroup 的 cross。"
     });
   }
-  if (meta.length > 0) {
+  if (show("meta") && meta.length > 0) {
     sections.push({
       type: "section",
       section: "meta",
@@ -2517,7 +2845,7 @@ function fileSectionNodes(filePath, docs) {
       tooltip: "概念解释，例如 SBuffer、LoadUnit 等学习入口。"
     });
   }
-  if (unknown.length > 0) {
+  if (show("unknown") && unknown.length > 0) {
     sections.push({
       type: "section",
       section: "unknown",
@@ -2527,7 +2855,302 @@ function fileSectionNodes(filePath, docs) {
       icon: "symbol-misc"
     });
   }
+  if (!sections.some((section) => section.type === "section") && filter !== "all") {
+    sections.push({
+      type: "empty",
+      label: emptyFilterLabel(filter, diagnostics),
+      description: "change filter",
+      tooltip: emptyFilterTooltip(filter, diagnostics)
+    });
+  }
   return sections;
+}
+
+function shouldShowRoleWarnings(filter) {
+  return ["all", "primary", "secondary", "unclassified", "covergroups"].includes(filter);
+}
+
+function symbolsViewShowsSection(filter, section) {
+  const sections = SYMBOLS_VIEW_FILTER_SECTIONS[filter] || SYMBOLS_VIEW_FILTER_SECTIONS.all;
+  return sections.has(section);
+}
+
+function isRoleFilter(filter) {
+  return filter === "primary" || filter === "secondary" || filter === "unclassified";
+}
+
+function covergroupRole(doc) {
+  if (!doc) {
+    return "";
+  }
+  const explicit = firstField(doc, "role");
+  if (!explicit) {
+    return "";
+  }
+  const match = explicit.match(/\b(primary|secondary)\b/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function covergroupMatchesRole(doc, filter) {
+  if (!isRoleFilter(filter)) {
+    return true;
+  }
+  const role = covergroupRole(doc);
+  if (filter === "unclassified") {
+    return !role;
+  }
+  return role === filter;
+}
+
+function filterCovergroupDocs(covergroups, filter = symbolsViewFilter()) {
+  if (!isRoleFilter(filter)) {
+    return covergroups;
+  }
+  return covergroups.filter((doc) => covergroupMatchesRole(doc, filter));
+}
+
+function filterTestpointDocs(testpoints, filePath, fileDocs, filter = symbolsViewFilter()) {
+  if (!isRoleFilter(filter) || filter === "unclassified") {
+    return filter === "unclassified" ? [] : testpoints;
+  }
+  return testpoints.filter((doc) => filteredTestpointRefs(doc, fileDocs, filter).length > 0);
+}
+
+function roleMapDiagnostics(filePath, docs) {
+  const covergroups = docs.filter((doc) => doc.kind === "covergroup");
+  const byName = new Map(covergroups.map((doc) => [doc.name, doc]));
+  const primary = covergroups.filter((doc) => covergroupRole(doc) === "primary");
+  const secondary = covergroups.filter((doc) => covergroupRole(doc) === "secondary");
+  const unclassified = covergroups.filter((doc) => !covergroupRole(doc));
+  const roleEntries = [];
+  const missingTargets = [];
+  const duplicatePairs = [];
+  const startLine = covergroupRoleMapStartLine(docs);
+
+  for (const [name, docsForName] of groupRoleDocsByName(docs).entries()) {
+    for (const doc of docsForName) {
+      const role = covergroupRole(doc);
+      if (role) {
+        roleEntries.push({ name, role, line: Number(firstField(doc, "role-map-line") || 0), doc });
+      }
+    }
+  }
+
+  const rawRoleMap = activeRoleMapForDocs(docs);
+  for (const entry of rawRoleMap.entries) {
+    if (!byName.has(entry.name)) {
+      missingTargets.push(entry);
+    }
+  }
+  duplicatePairs.push(...rawRoleMap.duplicates);
+
+  return {
+    filePath,
+    covergroups,
+    primary,
+    secondary,
+    unclassified,
+    roleEntries,
+    missingTargets,
+    duplicates: duplicatePairs,
+    startLine
+  };
+}
+
+function groupRoleDocsByName(docs) {
+  const result = new Map();
+  for (const doc of docs) {
+    if (doc.kind !== "covergroup") {
+      continue;
+    }
+    if (!result.has(doc.name)) {
+      result.set(doc.name, []);
+    }
+    result.get(doc.name).push(doc);
+  }
+  return result;
+}
+
+function activeRoleMapForDocs(docs) {
+  const result = { entries: [], duplicates: [] };
+  const roleDocs = roleMapEntryDocsFromDocs(docs);
+  for (const doc of roleDocs) {
+    result.entries.push({
+      name: firstField(doc, "covergroup") || doc.sourceLine || doc.name,
+      role: firstField(doc, "role") || "",
+      detail: firstField(doc, "role-detail") || "",
+      line: doc.line
+    });
+  }
+  const seen = new Map();
+  for (const entry of result.entries) {
+    if (seen.has(entry.name)) {
+      result.duplicates.push({ name: entry.name, first: seen.get(entry.name), duplicate: entry });
+    } else {
+      seen.set(entry.name, entry);
+    }
+  }
+  return result;
+}
+
+function covergroupRoleMapStartLine(docs) {
+  const roleDocs = roleMapEntryDocsFromDocs(docs);
+  if (roleDocs.length === 0) {
+    return 0;
+  }
+  return Math.min(...roleDocs.map((doc) => doc.line));
+}
+
+function roleMapSummaryText(diagnostics) {
+  const warn = diagnostics.missingTargets.length + diagnostics.duplicates.length;
+  const suffix = warn ? ` · ${warn} warning${warn === 1 ? "" : "s"}` : "";
+  return `${diagnostics.primary.length} primary · ${diagnostics.secondary.length} secondary · ${diagnostics.unclassified.length} unclassified${suffix}`;
+}
+
+function roleWarningNodes(filePath, diagnostics) {
+  const nodes = [];
+  for (const item of diagnostics.missingTargets) {
+    nodes.push({
+      type: "roleWarning",
+      filePath,
+      line: item.line,
+      label: `Role map target not found: ${item.name}`,
+      description: item.role,
+      tooltip: `Covergroup role map lists ${item.name}, but no matching covergroup declaration was indexed.`
+    });
+  }
+  for (const item of diagnostics.duplicates) {
+    nodes.push({
+      type: "roleWarning",
+      filePath,
+      line: item.duplicate.line,
+      label: `Duplicate role map entry: ${item.name}`,
+      description: item.duplicate.role,
+      tooltip: `First entry at line ${item.first.line}; duplicate at line ${item.duplicate.line}.`
+    });
+  }
+  return nodes;
+}
+
+function emptyFilterLabel(filter, diagnostics) {
+  if (filter === "primary") {
+    return diagnostics.covergroups.length === 0
+      ? "No covergroups indexed yet"
+      : "No primary covergroups found";
+  }
+  if (filter === "secondary") {
+    return diagnostics.covergroups.length === 0
+      ? "No covergroups indexed yet"
+      : "No secondary covergroups found";
+  }
+  if (filter === "unclassified") {
+    return "No unclassified covergroups";
+  }
+  return `No symbols match ${symbolsViewFilterLabel(filter)}`;
+}
+
+function emptyFilterTooltip(filter, diagnostics) {
+  if (filter === "primary" || filter === "secondary") {
+    return diagnostics.startLine
+      ? "Check Covergroup role map entries or run Rescan Symbols."
+      : "No Covergroup role map was indexed for this file. Add one or run Rescan Symbols after editing.";
+  }
+  return "Use the filter button in the view title to show another symbol set.";
+}
+
+function roleMapDiagnosticLines(filePath, diagnostics) {
+  const lines = [];
+  lines.push("");
+  lines.push(`MemBlock Coverage Role Map: ${relativePath(filePath)}`);
+  lines.push(roleMapSummaryText(diagnostics));
+  if (diagnostics.startLine) {
+    lines.push(`role map starts near line ${diagnostics.startLine}`);
+  } else {
+    lines.push("role map not found");
+  }
+  if (diagnostics.missingTargets.length > 0) {
+    lines.push("missing targets:");
+    for (const item of diagnostics.missingTargets) {
+      lines.push(`  line ${item.line}: ${item.name} (${item.role})`);
+    }
+  }
+  if (diagnostics.duplicates.length > 0) {
+    lines.push("duplicate entries:");
+    for (const item of diagnostics.duplicates) {
+      lines.push(`  ${item.name}: first line ${item.first.line}, duplicate line ${item.duplicate.line}`);
+    }
+  }
+  if (diagnostics.unclassified.length > 0) {
+    lines.push("unclassified covergroups:");
+    for (const doc of diagnostics.unclassified) {
+      lines.push(`  line ${doc.line}: ${doc.name}`);
+    }
+  }
+  if (diagnostics.missingTargets.length === 0 && diagnostics.duplicates.length === 0 && diagnostics.unclassified.length === 0) {
+    lines.push("role map looks complete.");
+  }
+  return lines;
+}
+
+function refreshAllRoleMapDiagnostics() {
+  if (!roleDiagnosticCollection) {
+    return;
+  }
+  roleDiagnosticCollection.clear();
+  for (const filePath of sortedIndexedFiles()) {
+    refreshRoleMapDiagnosticsForFile(filePath, docsForFile(filePath));
+  }
+}
+
+function refreshRoleMapDiagnosticsForFile(filePath, docs) {
+  if (!roleDiagnosticCollection || !filePath) {
+    return;
+  }
+  const diagnostics = roleMapDiagnostics(filePath, docs);
+  const items = roleMapProblemDiagnostics(diagnostics);
+  roleDiagnosticCollection.set(vscode.Uri.file(filePath), items);
+}
+
+function clearRoleMapDiagnostics() {
+  if (roleDiagnosticCollection) {
+    roleDiagnosticCollection.clear();
+  }
+}
+
+function clearRoleMapDiagnosticsForFile(filePath) {
+  if (roleDiagnosticCollection && filePath) {
+    roleDiagnosticCollection.delete(vscode.Uri.file(filePath));
+  }
+}
+
+function roleMapProblemDiagnostics(diagnostics) {
+  const items = [];
+  for (const item of diagnostics.missingTargets) {
+    items.push(makeRoleMapDiagnostic(
+      item.line,
+      `Covergroup role map target not found: ${item.name}`,
+      vscode.DiagnosticSeverity.Warning,
+      "missing-covergroup"
+    ));
+  }
+  for (const item of diagnostics.duplicates) {
+    items.push(makeRoleMapDiagnostic(
+      item.duplicate.line,
+      `Duplicate covergroup role map entry: ${item.name}`,
+      vscode.DiagnosticSeverity.Warning,
+      "duplicate-covergroup"
+    ));
+  }
+  return items;
+}
+
+function makeRoleMapDiagnostic(oneBasedLine, message, severity, code) {
+  const line = Math.max(Number(oneBasedLine || 1) - 1, 0);
+  const range = new vscode.Range(line, 0, line, 200);
+  const diagnostic = new vscode.Diagnostic(range, message, severity);
+  diagnostic.source = "MemBlock Coverage Role Map";
+  diagnostic.code = code;
+  return diagnostic;
 }
 
 function signalCategoryNodes(filePath, signalDocsList) {
@@ -2658,12 +3281,23 @@ function binsForCoverpoint(fileDocs, coverpointDoc) {
 }
 
 function testpointCovergroupRefNodes(testpointDoc, fileDocs) {
-  return testpointCgRefs(testpointDoc).map((ref) => ({
+  return filteredTestpointRefs(testpointDoc, fileDocs).map((ref) => ({
     type: "covergroupRef",
     doc: testpointDoc,
     ref,
     target: bestCovergroupDoc(ref.name, testpointDoc.filePath, fileDocs)
   }));
+}
+
+function filteredTestpointRefs(testpointDoc, fileDocs, filter = symbolsViewFilter()) {
+  const refs = testpointCgRefs(testpointDoc);
+  if (!isRoleFilter(filter)) {
+    return refs;
+  }
+  return refs.filter((ref) => {
+    const target = bestCovergroupDoc(ref.name, testpointDoc.filePath, fileDocs);
+    return covergroupMatchesRole(target, filter);
+  });
 }
 
 function testpointCgRefs(testpointDoc) {
@@ -2702,7 +3336,7 @@ function docsForFile(filePath) {
 }
 
 function sortedIndexedFiles() {
-  return [...new Set(canonicalDocs.map((doc) => doc.filePath))].sort((a, b) => {
+  return [...new Set(publicDocs(canonicalDocs).map((doc) => doc.filePath))].sort((a, b) => {
     const active = activeCoverageFilePath();
     if (a === active && b !== active) {
       return -1;
@@ -2736,7 +3370,7 @@ function sortDocs(docs) {
 
 function fileCountSummary(docs) {
   const counts = new Map();
-  for (const doc of docs) {
+  for (const doc of publicDocs(docs)) {
     counts.set(doc.kind, (counts.get(doc.kind) || 0) + 1);
   }
   return KIND_ORDER

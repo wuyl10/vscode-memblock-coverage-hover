@@ -19,6 +19,9 @@
     "onCommand:memblockCoverageHover.searchSymbol",
     "onCommand:memblockCoverageHover.openGlossary",
     "onCommand:memblockCoverageHover.toggleEnable",
+    "onCommand:memblockCoverageHover.filterSymbolsView",
+    "onCommand:memblockCoverageHover.validateRoleMap",
+    "onCommand:memblockCoverageHover.resetSymbolsViewFilter",
     "onCommand:memblockCoverageHover.openLocation",
     "onView:memblockCoverageHover.symbols"
   ],
@@ -48,6 +51,24 @@
         "title": "MemBlock Coverage Hover: Toggle Enable",
         "shortTitle": "Toggle Enable",
         "icon": "$(circle-slash)"
+      },
+      {
+        "command": "memblockCoverageHover.filterSymbolsView",
+        "title": "MemBlock Coverage Hover: Filter Symbols View",
+        "shortTitle": "Filter Symbols",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "memblockCoverageHover.validateRoleMap",
+        "title": "MemBlock Coverage Hover: Validate Role Map",
+        "shortTitle": "Validate Role Map",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "memblockCoverageHover.resetSymbolsViewFilter",
+        "title": "MemBlock Coverage Hover: Reset Symbols Filter",
+        "shortTitle": "Reset Filter",
+        "icon": "$(clear-all)"
       }
     ],
     "keybindings": [
@@ -151,6 +172,20 @@
           "type": "boolean",
           "default": false,
           "description": "Show the MemBlock Coverage Symbols view in Explorer. Disabled by default to keep the side bar uncluttered."
+        },
+        "memblockCoverageHover.symbolsViewFilter": {
+          "type": "string",
+          "enum": [
+            "all",
+            "primary",
+            "secondary",
+            "unclassified",
+            "testpoints",
+            "covergroups",
+            "signals"
+          ],
+          "default": "all",
+          "description": "Filter the MemBlock Coverage Symbols tree. Primary/secondary/unclassified use the SV Covergroup role map when present."
         }
       }
     },
@@ -170,6 +205,21 @@
           "command": "memblockCoverageHover.openGlossary",
           "when": "view == memblockCoverageHover.symbols",
           "group": "navigation@3"
+        },
+        {
+          "command": "memblockCoverageHover.filterSymbolsView",
+          "when": "view == memblockCoverageHover.symbols",
+          "group": "navigation@4"
+        },
+        {
+          "command": "memblockCoverageHover.validateRoleMap",
+          "when": "view == memblockCoverageHover.symbols",
+          "group": "navigation@5"
+        },
+        {
+          "command": "memblockCoverageHover.resetSymbolsViewFilter",
+          "when": "view == memblockCoverageHover.symbols && memblockCoverageHover.symbolsViewFiltered",
+          "group": "navigation@6"
         }
       ]
     },
